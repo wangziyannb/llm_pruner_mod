@@ -2,14 +2,18 @@
 Refer to
 https://github.com/tloen/alpaca-lora/blob/main/finetune.py
 '''
-
+import json
 import os
+import pickle
+import random
 import sys
 import argparse
 from typing import List
 from pathlib import Path
 
+import numpy as np
 import torch
+import tqdm
 import transformers
 from datasets import load_dataset
 
@@ -25,7 +29,17 @@ from LLMPruner.datasets.ppl_dataset import get_loaders
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+
+def set_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 def main(args):
+    set_random_seed(args.seed)
+    print("seed: ", args.seed)
     # Set WanDB
     os.environ["WANDB_PROJECT"] = args.wandb_project
 
@@ -59,9 +73,9 @@ def main(args):
             return_tensors=None,
         )
         if (
-            result["input_ids"][-1] != tokenizer.eos_token_id
-            and len(result["input_ids"]) < args.cutoff_len
-            and add_eos_token
+                result["input_ids"][-1] != tokenizer.eos_token_id
+                and len(result["input_ids"]) < args.cutoff_len
+                and add_eos_token
         ):
             result["input_ids"].append(tokenizer.eos_token_id)
             result["attention_mask"].append(1)
@@ -71,40 +85,58 @@ def main(args):
         return result
 
     def generate_and_tokenize_prompt(data_point):
-        if 'lamini' in args.data_path.lower():
-            full_prompt = prompter.generate_prompt(
-                data_point["instruction"],
-                None,
-                data_point["response"],
-            )
-        elif 'alpaca' in args.data_path.lower():
-            full_prompt = prompter.generate_prompt(
-                data_point["instruction"],
-                data_point["input"],
-                data_point["output"],
-            )
+        if 'alpaca' not in args.data_path.lower():
+            full_prompt = data_point["inputs"]
         else:
-            raise NotImplementedError
-
+            full_prompt = prompter.generate_prompt(data_point)
         tokenized_full_prompt = tokenize(full_prompt)
         if not args.train_on_inputs:
-            user_prompt = prompter.generate_prompt(
-                data_point["instruction"], data_point["input"] if 'input' in data_point.keys() else None,
-            )
-            tokenized_user_prompt = tokenize(
-                user_prompt, add_eos_token=args.add_eos_token
-            )
+            user_prompt = prompter.generate_prompt({**data_point, "output": ""})
+            tokenized_user_prompt = tokenize(user_prompt, add_eos_token=False)
             user_prompt_len = len(tokenized_user_prompt["input_ids"])
 
-            if args.add_eos_token:
-                user_prompt_len -= 1
-
             tokenized_full_prompt["labels"] = [
-                -100
-            ] * user_prompt_len + tokenized_full_prompt["labels"][
-                user_prompt_len:
-            ]  # could be sped up, probably
+                                                  -100
+                                              ] * user_prompt_len + tokenized_full_prompt["labels"][
+                                                                    user_prompt_len:
+                                                                    ]  # could be sped up, probably
         return tokenized_full_prompt
+
+    # def generate_and_tokenize_prompt(data_point):
+    #     if 'lamini' in args.data_path.lower():
+    #         full_prompt = prompter.generate_prompt(
+    #             data_point["instruction"],
+    #             None,
+    #             data_point["response"],
+    #         )
+    #     elif 'alpaca' in args.data_path.lower():
+    #         full_prompt = prompter.generate_prompt(
+    #             data_point["instruction"],
+    #             data_point["input"],
+    #             data_point["output"],
+    #         )
+    #     else:
+    #         raise NotImplementedError
+    #
+    #     tokenized_full_prompt = tokenize(full_prompt)
+    #     if not args.train_on_inputs:
+    #         user_prompt = prompter.generate_prompt(
+    #             data_point["instruction"], data_point["input"] if 'input' in data_point.keys() else None,
+    #         )
+    #         tokenized_user_prompt = tokenize(
+    #             user_prompt, add_eos_token=args.add_eos_token
+    #         )
+    #         user_prompt_len = len(tokenized_user_prompt["input_ids"])
+    #
+    #         if args.add_eos_token:
+    #             user_prompt_len -= 1
+    #
+    #         tokenized_full_prompt["labels"] = [
+    #             -100
+    #         ] * user_prompt_len + tokenized_full_prompt["labels"][
+    #             user_prompt_len:
+    #         ]  # could be sped up, probably
+    #     return tokenized_full_prompt
 
     def split_and_tokenizer(test_data, tokenizer, seq_len, field_name):
         test_ids = tokenizer("\n\n".join(test_data[field_name]), return_tensors='pt').input_ids[0]
@@ -130,16 +162,44 @@ def main(args):
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, config)
-    model.print_trainable_parameters()  
+    model.print_trainable_parameters()
 
     # Load Train Dataset
-    data = load_dataset(args.data_path)
+    # data = load_dataset(
+    #     'json', data_files={'train': 'c4-train.00000-of-01024.json.gz'}, split='train[:10%]'
+    # )
+
+    def get_c4(samples, cutoff_len, tokenizer):
+        if os.path.exists("data/c4.json"):
+            dataset = load_dataset("json", data_files="data/c4.json")
+            if len(dataset['train']) == samples:
+                print("load c4 from {}".format("data/c4.json"))
+                return dataset
+
+        with open(f'sampled_dataset_seed{args.seed}_seqlen256_size20000.pkl', 'rb') as file:
+            dataset = pickle.load(file)
+        # dataset = load_dataset('allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
+        print(f"Sampling {samples} data from sampled_dataset_seed{args.seed}_seqlen256_size20000.pkl")
+        subdata, history = [], []
+        for _ in tqdm.tqdm(range(samples)):
+            while True:
+                i = random.randint(0, len(dataset) - 1)
+                trainenc = tokenizer(dataset[i]['text'], return_tensors='pt')
+                if trainenc.input_ids.shape[1] > cutoff_len and i not in history:
+                    history.append(i)
+                    break
+            subdata.append({"inputs": dataset[i]['text']})
+        with open('data/c4.json', 'w') as f:
+            f.writelines(json.dumps(subdata))
+        return load_dataset("json", data_files="data/c4.json")
+
     if args.cache_dataset and os.path.exists('datasets/cache/{}.bin'.format(args.data_path)):
         preprocess_data = torch.load('datasets/cache/{}.bin'.format(args.data_path))
         train_data, val_data = preprocess_data['train'], preprocess_data['val']
     else:
-        train_val = data["train"].train_test_split(
-            test_size=args.val_set_size, shuffle=True, seed=42
+        train_val = get_c4(20000, 256, tokenizer)
+        train_val = train_val['train'].train_test_split(
+            test_size=args.val_set_size, shuffle=True, seed=args.seed
         )
         train_data = (
             train_val["train"].shuffle().map(generate_and_tokenize_prompt)
@@ -197,6 +257,7 @@ def main(args):
             report_to="wandb",
             run_name=args.output_dir.split('/')[-1],
             metric_for_best_model="{}_loss".format(args.data_path),
+            seed=args.seed,
         ),
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
@@ -233,28 +294,33 @@ if __name__ == "__main__":
     parser.add_argument('--num_epochs', type=int, default=5, help='number of epochs')
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='learning rate')
     parser.add_argument('--cutoff_len', type=int, default=256, help='cutoff length')
-    parser.add_argument('--val_set_size', type=int, default=2000, help='validation set size')
-    parser.add_argument('--prompt_template_name', type=str, default="alpaca", help="The prompt template to use, will default to alpaca.")
-    parser.add_argument('--no_instruction', action='store_true', default=False, help="Whether to use the instruction template or not.")
+    parser.add_argument('--val_set_size', type=int, default=800, help='validation set size')
+    parser.add_argument('--prompt_template_name', type=str, default="alpaca",
+                        help="The prompt template to use, will default to alpaca.")
+    parser.add_argument('--no_instruction', action='store_true', default=False,
+                        help="Whether to use the instruction template or not.")
 
     # Lora Configuration
     parser.add_argument('--lora_r', type=int, default=8, help='lora r')
     parser.add_argument('--lora_alpha', type=int, default=16, help='lora alpha')
     parser.add_argument('--lora_dropout', type=float, default=0.05, help='lora dropout')
-    parser.add_argument('--lora_target_modules', type=str, default="q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj", help='lora target modules')
+    parser.add_argument('--lora_target_modules', type=str,
+                        default="q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj", help='lora target modules')
 
     # llm hyperparameters
-    parser.add_argument('--train_on_inputs', default=False, action="store_true", help='Train on inputs. If False, masks out inputs in loss')
+    parser.add_argument('--train_on_inputs', default=False, action="store_true",
+                        help='Train on inputs. If False, masks out inputs in loss')
     parser.add_argument('--add_eos_token', default=False, action="store_true")
-    parser.add_argument('--group_by_length', default=False, action="store_true", help="faster, but produces an odd training loss curve")
-   
+    parser.add_argument('--group_by_length', default=False, action="store_true",
+                        help="faster, but produces an odd training loss curve")
+    parser.add_argument('--seed', type=int, default=0, help='seed')
     # wandb params
     parser.add_argument('--wandb_project', type=str, default="")
     parser.add_argument('--resume_from_checkpoint', type=str, help="either training checkpoint or final adapter")
 
-    #ddp
+    # ddp
     parser.add_argument('--local_rank', type=int, default=-1)
-   
+
     args = parser.parse_args()
     torch_version = int(torch.__version__.split('.')[1])
     args.torch_version = torch_version

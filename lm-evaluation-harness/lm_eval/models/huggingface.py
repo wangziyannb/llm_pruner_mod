@@ -144,7 +144,8 @@ class HuggingFaceAutoLM(BaseLM):
                 If True, will trust the remote code when loading the model.
         """
         super().__init__()
-
+        print(checkpoint,(isinstance(checkpoint, str)))
+        print(config_pretrained, (isinstance(config_pretrained, str)))
         assert isinstance(pretrained, str) or (isinstance(checkpoint, str) and isinstance(config_pretrained, str))
         assert isinstance(device, str)
         assert isinstance(batch_size, (int, str))
