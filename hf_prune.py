@@ -7,10 +7,12 @@ import json
 import copy
 import random
 import argparse
+from pathlib import Path
 from typing import Tuple
 
 import torch
 import numpy as np
+from config import Config
 from datasets import load_dataset
 from transformers import LlamaTokenizer, GenerationConfig, LlamaConfig
 from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention, LlamaMLP
@@ -21,13 +23,40 @@ from LLMPruner.utils.logger import LoggerWithDepth
 from LLMPruner.evaluator.ppl import PPLMetric
 from LLMPruner.datasets.example_samples import get_examples
 from LLMPruner.templates.prompts import prompts
+from data_prune import get_loaders
 
-
+import lm_eval
 def set_random_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def make_prune_data(prune_config, model_config, seed, tokenizer):
+    print("loading calibdation data")
+    if prune_config.prune_dataset.pickle_dump:
+        if os.path.exists(prune_config.prune_dataset.pickle.prune_path):
+            with open(prune_config.prune_dataset.pickle.prune_path, 'rb') as f:
+                dataloader = pickle.load(f)
+        else:
+            raise FileNotFoundError
+    else:
+        dataloader, _ = get_loaders(prune_config.prune_dataset.name, nsamples=prune_config.prune_dataset.n_samples,
+                                    seed=seed, seqlen=prune_config.prune_dataset.seq_len, tokenizer=tokenizer,
+                                    data_path=prune_config.prune_dataset.path, base_model=model_config.name)
+        with open(f'{prune_config.prune_dataset.name}_prune_data.pkl', 'wb') as f:
+            pickle.dump(dataloader, f)
+
+    print("dataset loading complete")
+    return dataloader
+
+
+def count_params(layers):
+    layer_params = 0
+    for l in layers:
+        layer_params += sum(p.numel() for p in l.parameters())
+    return layer_params
 
 
 def main(args):
@@ -76,8 +105,9 @@ def main(args):
 
     for param in model.parameters():
         param.requires_grad_(True)
-    before_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
+    # before_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    layers=model.base_model.layers
+    before_pruning_parameters=count_params(layers)
     forward_prompts = torch.tensor([
         [1, 306, 4658, 278, 6593, 310, 2834, 338],
         [1, 3439, 17632, 1925, 29892, 278, 6368, 310],
@@ -147,36 +177,53 @@ def main(args):
                 tokenized_samples.append(tokenized_sample.input_ids[:, i:i + seq_len])
             return torch.cat(tokenized_samples, dim=0)
 
+        config = Config(args.config_path)
+        c = config.get_config()
+        prune_data = make_prune_data(c.task.prune, c.model, c.task.seed, tokenizer)
+
+        prune_data = torch.stack([data[0].view(-1) for data in prune_data])
+        prune_data = prune_data.to(model.device)
+        batch_size = c.task.prune.batch_size
         for i in range(args.iterative_steps):
 
             if pruner_type in ['taylor']:
-                example_prompts = get_c4(tokenizer, 10, seq_len=64).to(args.device)
+                # example_prompts = get_c4(tokenizer, 10, seq_len=256).to(args.device)
                 # example_prompts = get_examples('c4', tokenizer, 10, seq_len=64).to(args.device)
                 # example_prompts =get_examples('bookcorpus', tokenizer, 10, seq_len=64).to(args.device)
                 logger.log("Start Backwarding in iterative steps = {}...".format(i))
-                if args.taylor in ['param_mix', 'param_second']:
-                    for j in range(args.num_examples):
-                        batch_input = example_prompts[j].unsqueeze(0)
+                # if args.taylor in ['param_mix', 'param_second']:
+                #     for j in range(args.num_examples):
+                #         batch_input = example_prompts[j].unsqueeze(0)
+                #         loss = model(batch_input, labels=batch_input).loss
+                #         logger.log("Loss = {}".format(loss))
+                #         loss.backward()
+                #
+                #         for module_param in model.parameters():
+                #             module_param.grad = module_param.grad * module_param.grad / args.num_examples
+                #             if hasattr(module_param, 'acc_grad'):
+                #                 module_param.acc_grad += module_param.grad
+                #             else:
+                #                 module_param.acc_grad = copy.deepcopy(module_param.grad)
+                #         model.zero_grad()
+                #         del loss.grad
+                if batch_size == 1:
+                    for j in range(c.task.prune.prune_dataset.n_samples):
+                        batch_input = prune_data[j].unsqueeze(0)
                         loss = model(batch_input, labels=batch_input).loss
                         logger.log("Loss = {}".format(loss))
                         loss.backward()
-
-                        for module_param in model.parameters():
-                            module_param.grad = module_param.grad * module_param.grad / args.num_examples
-                            if hasattr(module_param, 'acc_grad'):
-                                module_param.acc_grad += module_param.grad
-                            else:
-                                module_param.acc_grad = copy.deepcopy(module_param.grad)
-                        model.zero_grad()
-                        del loss.grad
-
-                loss = model(example_prompts, labels=example_prompts).loss
-                logger.log("Loss = {}".format(loss))
-                loss.backward()
+                else:
+                    for j in range(0, c.task.prune.prune_dataset.n_samples, batch_size):
+                        end_idx = min(j + batch_size, c.task.prune.prune_dataset.n_samples)
+                        batch_input = prune_data[j:end_idx]
+                        actual_batch_size = len(batch_input)
+                        loss = model(batch_input, labels=batch_input).loss * actual_batch_size
+                        logger.log("Loss = {}".format(loss))
+                        loss.backward()
 
             pruner.step()
 
-            after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            after_pruning_parameters = count_params(layers)
             logger.log(
                 "After Iter {}/{}, #parameters: {}".format(i + 1, args.iterative_steps, after_pruning_parameters))
 
@@ -230,7 +277,7 @@ def main(args):
 
             pruner.step()
 
-            after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            after_pruning_parameters = count_params(layers)
             logger.log(
                 "After Iter {}/{}, #parameters: {}".format(i + 1, args.iterative_steps, after_pruning_parameters))
 
@@ -253,8 +300,8 @@ def main(args):
     else:
         raise NotImplementedError
     logger.log("#Param before: {}, #Param after: {}, Ratio = {:.4f}%".format(before_pruning_parameters,
-                                                                             after_pruning_parameters,
-                                                                             100.0 * after_pruning_parameters / before_pruning_parameters))
+                                                                             count_params(layers),
+                                                                             100.0 * count_params(layers) / before_pruning_parameters))
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -296,10 +343,52 @@ def main(args):
 
         logger.log("\n==================Finish================\n")
 
-    ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.eval_device)
-    logger.log("PPL after pruning: {}".format(ppl))
-    logger.log("Memory Requirement: {} MiB\n".format(torch.cuda.memory_allocated() / 1024 / 1024))
+    # ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.eval_device)
+    # logger.log("PPL after pruning: {}".format(ppl))
+    # logger.log("Memory Requirement: {} MiB\n".format(torch.cuda.memory_allocated() / 1024 / 1024))
 
+    with torch.no_grad():
+        model.eval()
+        model.half()
+        if c.evaluation.lm_eval:
+            lm_simple_eval(c, model, tokenizer, "result.json", logger)
+
+
+
+def lm_simple_eval(c, model, tokenizer, result_name,logger):
+    wrapped_model = lm_eval.models.huggingface.HFLM(model, tokenizer=tokenizer, batch_size='auto')
+    results = lm_eval.simple_evaluate(  # call simple_evaluate
+        model=wrapped_model,
+        # tasks=c.evaluation.lm_eval_options.tasks,
+        # tasks=["openbookqa", "arc_easy", "winogrande", "hellaswag", "arc_challenge", "piqa", "boolq"],
+        tasks=["openbookqa"],
+        num_fewshot=0,
+        log_samples=False,
+    )
+
+    def _handle_non_serializable(o):
+        if isinstance(o, np.int64) or isinstance(o, np.int32):
+            return int(o)
+        elif isinstance(o, set):
+            return list(o)
+        else:
+            return str(o)
+
+    path = Path(logger.sub_dir)
+    # check if file or 'dir/results.json' exists
+    if path.is_file():
+        raise FileExistsError(f"File already exists at {path}")
+    output_path_file = path.joinpath(f"{result_name}.json")
+    if path.suffix in (".json", ".jsonl"):
+        output_path_file = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path = path.parent
+    else:
+        path.mkdir(parents=True, exist_ok=True)
+    dumped = json.dumps(
+        results, indent=2, default=_handle_non_serializable, ensure_ascii=False
+    )
+    output_path_file.open("w", encoding="utf-8").write(dumped)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Pruning LLaMA (huggingface version)')
@@ -328,6 +417,7 @@ if __name__ == "__main__":
     parser.add_argument('--block_attention_layer_end', type=int, help='end layer of block attention layers', default=31)
     parser.add_argument('--block_mlp_layer_start', type=int, help='start layer of block mlp layers', default=3)
     parser.add_argument('--block_mlp_layer_end', type=int, help='end layer of block mlp layers', default=31)
+    parser.add_argument('--config_path', type=str, help='config', default='')
 
     parser.add_argument('--iterative_steps', type=int, default=1, help="Iteration step for pruning. Default=1")
     parser.add_argument('--grouping_strategy', type=str, default='sum', help='Reduce method for grouping')

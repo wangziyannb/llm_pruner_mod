@@ -2,7 +2,7 @@
 SCRIPT_A='scripts/a.sh'
 SCRIPT_B='scripts/b.sh'
 #BASE_MODEL='baffo32/decapoda-research-llama-7B-hf'
-BASE_MODEL='llama2-7b'
+BASE_MODEL='/home/zwang53/llama2-7b'
 prune0='0_llmpruner_llama-2-7b_0.2'
 prune1='0_llmpruner_llama-2-7b_0.4'
 prune2='0_llmpruner_llama-2-7b_0.6'
@@ -24,6 +24,7 @@ task(){
 }
 
 task_post_training(){
+
   CUDA_VISIBLE_DEVICES=$4 python post_training.py --prune_model prune_log/"$1"/pytorch_model.bin --data_path c4 --output_dir tune_log/"$2" --wandb_project "$2" --lora_r 8 --num_epochs $3 --learning_rate 1e-4 --batch_size 64 --train_on_inputs
 }
 

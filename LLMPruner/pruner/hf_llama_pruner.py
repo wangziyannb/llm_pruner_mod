@@ -263,7 +263,7 @@ class TaylorImportance(tp.importance.Importance):
                         salience[sub_layer] = -salience + 0.5 * sub_layer.weight * sub_layer.weight.acc_grad * sub_layer.weight   
             else:
                 salience = layer.weight * layer.weight.grad
-
+                print(torch.norm(layer.weight.grad, p=1))
                 if self.taylor in ['param_second']:
                     salience = layer.weight * layer.weight.acc_grad * layer.weight
                 elif self.taylor in ['param_mix']: 
@@ -340,4 +340,5 @@ class TaylorImportance(tp.importance.Importance):
         group_imp = self._reduce(group_imp)
         if self.normalizer is not None:
             group_imp = self.normalizer(group, group_imp)
+
         return group_imp

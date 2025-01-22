@@ -169,19 +169,19 @@ def main(args):
     #     'json', data_files={'train': 'c4-train.00000-of-01024.json.gz'}, split='train[:10%]'
     # )
 
-    def get_c4(samples, cutoff_len, tokenizer):
-        if os.path.exists("data/c4.json"):
-            dataset = load_dataset("json", data_files="data/c4.json")
+    def get_c4(samples, cutoff_len, tokenizer, seed):
+        if os.path.exists(f"data/c4_{seed}.json"):
+            dataset = load_dataset("json", data_files=f'data/c4_{seed}.json')
             if len(dataset['train']) == samples:
-                print("load c4 from {}".format("data/c4.json"))
+                print("load c4 from {}".format(f"data/c4_{seed}.json"))
                 return dataset
 
-        with open(f'sampled_dataset_seed{args.seed}_seqlen256_size20000.pkl', 'rb') as file:
+        with open(f'sampled_dataset_seed{seed}_seqlen256_size20000.pkl', 'rb') as file:
             dataset = pickle.load(file)
         # dataset = load_dataset('allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
-        print(f"Sampling {samples} data from sampled_dataset_seed{args.seed}_seqlen256_size20000.pkl")
+        print(f"Sampling {samples} data from sampled_dataset_seed{seed}_seqlen256_size20000.pkl")
         subdata, history = [], []
-        for _ in tqdm.tqdm(range(samples)):
+        for i in tqdm.tqdm(range(samples)):
             while True:
                 i = random.randint(0, len(dataset) - 1)
                 trainenc = tokenizer(dataset[i]['text'], return_tensors='pt')
@@ -189,15 +189,15 @@ def main(args):
                     history.append(i)
                     break
             subdata.append({"inputs": dataset[i]['text']})
-        with open('data/c4.json', 'w') as f:
+        with open(f'data/c4_{seed}.json', 'w') as f:
             f.writelines(json.dumps(subdata))
-        return load_dataset("json", data_files="data/c4.json")
+        return load_dataset("json", data_files=f'data/c4_{seed}.json')
 
     if args.cache_dataset and os.path.exists('datasets/cache/{}.bin'.format(args.data_path)):
         preprocess_data = torch.load('datasets/cache/{}.bin'.format(args.data_path))
         train_data, val_data = preprocess_data['train'], preprocess_data['val']
     else:
-        train_val = get_c4(20000, 256, tokenizer)
+        train_val = get_c4(20000, 256, tokenizer, args.seed)
         train_val = train_val['train'].train_test_split(
             test_size=args.val_set_size, shuffle=True, seed=args.seed
         )
