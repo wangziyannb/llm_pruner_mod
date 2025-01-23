@@ -1,0 +1,82 @@
+model:
+  type: causal
+  struct: hf
+  name: meta-llama/Llama-2-7b-hf
+  alias: &global_model_name Llama-2-7b-hf
+  torch_dtype: bfloat16
+  model_peft: false
+  load_in_8bit: false
+  custom_modeling: true
+  custom_config:
+    custom_package_location: /root/tp_pipeline/external_code/oneshot_pruning_cosine_sim_inner_hs/modeling
+
+task:
+  seed: 0
+  project: &global_proj oneshot_pruning
+  datasets_folder: &datasets_folder /root/tp_pipeline/dataset
+  task_mode: prune
+  prune:
+    prune_dataset:
+      type: downstream
+      name: &prune_dataset_name c4
+      path: !join [ *datasets_folder, '/', *prune_dataset_name, '/train.json' ]
+      seq_len: &seq_len 256
+      n_samples: &n_samples 500
+    ratio: &ratio 0.5
+    max_ratio: 0.99
+    batch_size: 4
+    inter_score: &inter_score uniform
+    prune_metric: &prune_metric grad_sp_global
+    func_name: &func_name global_grad_sp
+    prune_modules: &prune_modules all
+    prune_separate: &prune_separate true
+    prune_skip: &prune_skip false
+    taylor: &taylor param_first
+    iterative: &iterative true
+    iteration: &iteration 64
+    iterative_scheduling: &iterative_scheduling linear
+    exp_alpha: 0.3
+    scale_loss: &scale_loss false
+    eval_before: false
+    custom_pruner: true
+    custom_config:
+      custom_package_location: /root/tp_pipeline/external_code/oneshot_pruning_cosine_sim_inner_hs/pruners
+  name: &global_name !join [ *ratio, '_', *func_name, '_iteration_', *iteration, '_iterative_scheduling_', *iterative_scheduling, '_prune_separate_', *prune_separate, '_scale_loss_', *scale_loss, '_taylor_', *taylor, '_iterative_', *iterative, '_prune_skip_', *prune_skip, '_prune_modules_',*prune_modules, '_interScore_',*inter_score, '_',*global_model_name, '_', *prune_metric,'_', *prune_dataset_name, '_', *seq_len, '_',*n_samples ]
+  output_folder: &output_folder !join [ '/root/tp_pipeline/denseLora', '/', *global_name ]
+
+
+evaluation:
+  lm_eval: true
+  lm_eval_options:
+    output_path: *output_folder
+    tasks: [ "openbookqa", "arc_easy", "winogrande", "hellaswag", "arc_challenge", "piqa", "boolq" ]
+  commonsense_eval: false
+  commonsense_eval_options:
+    output_path: *output_folder
+    dataset: [ 'boolq', 'piqa', 'hellaswag', 'winogrande', 'ARC-Easy', 'ARC-Challenge', 'openbookqa', 'social_i_qa' ]
+    batch_size: 20
+  ppl: false
+  ppl_options:
+    output_path: *output_folder
+  e2e: false
+  e2e_options:
+    output_path: *output_folder
+    test_path: '/root/tp_pipeline/dataset/e2e/test.txt'
+    eval_dataset: test
+    length: 100
+    temperature: 1.0
+    k: 0
+    repetition_penalty: 1.0
+
+report:
+  use_logger: true
+  logger:
+    log_file_path: !join [ *output_folder, '/', *global_name, '.txt' ]
+  use_wandb: true
+  wandb:
+    project: *global_proj
+    run: *global_name
+    watch: all
+
+
+

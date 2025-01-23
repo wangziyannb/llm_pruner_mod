@@ -255,14 +255,15 @@ class TaylorImportance(tp.importance.Importance):
             if prune_fn in [hf_attention_pruner.prune_out_channels]:
                 salience = {}
                 for sub_layer in [layer.o_proj, layer.q_proj, layer.k_proj, layer.v_proj]:
-                    salience[sub_layer] = sub_layer.weight * sub_layer.weight.grad
-                    
+                    salience[sub_layer] = sub_layer.weight * (sub_layer.weight.grad / 500)
+                    # will not test 2nd or mix
                     if self.taylor in ['param_second']:
                         salience[sub_layer] = sub_layer.weight * sub_layer.weight.acc_grad * sub_layer.weight
                     elif self.taylor in ['param_mix']: 
                         salience[sub_layer] = -salience + 0.5 * sub_layer.weight * sub_layer.weight.acc_grad * sub_layer.weight   
             else:
-                salience = layer.weight * layer.weight.grad
+                salience = layer.weight * (layer.weight.grad / 500)
+                # will not test 2nd or mix
                 print(torch.norm(layer.weight.grad, p=1))
                 if self.taylor in ['param_second']:
                     salience = layer.weight * layer.weight.acc_grad * layer.weight

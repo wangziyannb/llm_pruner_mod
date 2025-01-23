@@ -343,9 +343,9 @@ def main(args):
 
         logger.log("\n==================Finish================\n")
 
-    # ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.eval_device)
-    # logger.log("PPL after pruning: {}".format(ppl))
-    # logger.log("Memory Requirement: {} MiB\n".format(torch.cuda.memory_allocated() / 1024 / 1024))
+    ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.eval_device)
+    logger.log("PPL after pruning: {}".format(ppl))
+    logger.log("Memory Requirement: {} MiB\n".format(torch.cuda.memory_allocated() / 1024 / 1024))
 
     with torch.no_grad():
         model.eval()
@@ -359,9 +359,9 @@ def lm_simple_eval(c, model, tokenizer, result_name,logger):
     wrapped_model = lm_eval.models.huggingface.HFLM(model, tokenizer=tokenizer, batch_size='auto')
     results = lm_eval.simple_evaluate(  # call simple_evaluate
         model=wrapped_model,
-        # tasks=c.evaluation.lm_eval_options.tasks,
+        tasks=c.evaluation.lm_eval_options.tasks,
         # tasks=["openbookqa", "arc_easy", "winogrande", "hellaswag", "arc_challenge", "piqa", "boolq"],
-        tasks=["openbookqa"],
+        # tasks=["openbookqa"],
         num_fewshot=0,
         log_samples=False,
     )
