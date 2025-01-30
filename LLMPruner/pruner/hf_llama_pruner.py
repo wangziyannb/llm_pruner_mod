@@ -264,7 +264,7 @@ class TaylorImportance(tp.importance.Importance):
             else:
                 salience = layer.weight * (layer.weight.grad / 500)
                 # will not test 2nd or mix
-                print(torch.norm(layer.weight.grad, p=1))
+                # print(torch.norm(layer.weight.grad, p=1))
                 if self.taylor in ['param_second']:
                     salience = layer.weight * layer.weight.acc_grad * layer.weight
                 elif self.taylor in ['param_mix']: 

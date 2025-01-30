@@ -72,7 +72,8 @@ def main(args):
     tokenizer = LlamaTokenizer.from_pretrained(args.base_model)
     model = LlamaForCausalLM.from_pretrained(
         args.base_model,
-        low_cpu_mem_usage=True if args.torch_version >= 1.9 else False
+        low_cpu_mem_usage=True if args.torch_version >= 1.9 else False,
+        torch_dtype=torch.bfloat16 if args.dtype in ['bfloat16'] else torch.float16,
     )
     if args.device != "cpu":
         model.half()
@@ -210,7 +211,7 @@ def main(args):
                     for j in range(c.task.prune.prune_dataset.n_samples):
                         batch_input = prune_data[j].unsqueeze(0)
                         loss = model(batch_input, labels=batch_input).loss
-                        logger.log("Loss = {}".format(loss))
+                        # logger.log("Loss = {}".format(loss))
                         loss.backward()
                 else:
                     for j in range(0, c.task.prune.prune_dataset.n_samples, batch_size):
@@ -218,7 +219,7 @@ def main(args):
                         batch_input = prune_data[j:end_idx]
                         actual_batch_size = len(batch_input)
                         loss = model(batch_input, labels=batch_input).loss * actual_batch_size
-                        logger.log("Loss = {}".format(loss))
+                        # logger.log("Loss = {}".format(loss))
                         loss.backward()
 
             pruner.step()
@@ -306,6 +307,7 @@ def main(args):
     gc.collect()
     torch.cuda.empty_cache()
 
+
     if args.save_model:
         model.half()
         torch.save({
@@ -343,11 +345,10 @@ def main(args):
 
         logger.log("\n==================Finish================\n")
 
-    ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.eval_device)
-    logger.log("PPL after pruning: {}".format(ppl))
-    logger.log("Memory Requirement: {} MiB\n".format(torch.cuda.memory_allocated() / 1024 / 1024))
-
     with torch.no_grad():
+        ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.eval_device)
+        logger.log("PPL after pruning: {}".format(ppl))
+        logger.log("Memory Requirement: {} MiB\n".format(torch.cuda.memory_allocated() / 1024 / 1024))
         model.eval()
         model.half()
         if c.evaluation.lm_eval:
@@ -362,7 +363,7 @@ def lm_simple_eval(c, model, tokenizer, result_name,logger):
         tasks=c.evaluation.lm_eval_options.tasks,
         # tasks=["openbookqa", "arc_easy", "winogrande", "hellaswag", "arc_challenge", "piqa", "boolq"],
         # tasks=["openbookqa"],
-        num_fewshot=0,
+        num_fewshot=c.evaluation.lm_eval_options.num_fewshot,
         log_samples=False,
     )
 
@@ -431,6 +432,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_before_train', action='store_true', help='whether test before train')
     parser.add_argument('--eval_device', type=str, default="cuda", help='eval device')
     parser.add_argument('--test_after_train', action='store_true', help='whether test after train')
+    parser.add_argument('--dtype', type=str, help='config', default='float16')
 
     parser.add_argument('--seed', type=int, default=0, help='seed')
     parser.add_argument('--save_model', action='store_true', help='if save model')
